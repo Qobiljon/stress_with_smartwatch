@@ -14,7 +14,7 @@ import os
 
 
 def load_dataset(directory, participant, selected_column_names, screen_out_timestamps=None):
-    _dataset = pd.read_csv('{dir}/{participant}.csv'.format(dir=directory, participant=participant)).replace([np.inf, -np.inf], np.nan).dropna(axis=0).drop_duplicates(subset='timestamp')
+    _dataset = pd.read_csv('{dir}/{participant}.csv'.format(dir=directory, participant=participant)).replace([np.inf, -np.inf], np.nan).dropna(axis=0)#.drop_duplicates(subset='timestamp')
     if screen_out_timestamps is not None:
         _dataset = _dataset[~_dataset.timestamp.isin(screen_out_timestamps)]
     _features = _dataset[selected_column_names]
@@ -36,11 +36,14 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
     k_folds = []
     splitter = StratifiedKFold(n_splits=5, shuffle=True)
     for idx, (train_indices, test_indices) in enumerate(splitter.split(train_features, train_labels)):
-        x_train = train_features.iloc[train_indices]
-        y_train = train_labels.iloc[train_indices]
-        x_test = train_features.iloc[test_indices]
-        y_test = train_labels.iloc[test_indices]
-        k_folds.append((x_train, y_train, x_test, y_test))
+        try:
+            x_train = train_features.iloc[train_indices]
+            y_train = train_labels.iloc[train_indices]
+            x_test = train_features.iloc[test_indices]
+            y_test = train_labels.iloc[test_indices]
+            k_folds.append((x_train, y_train, x_test, y_test))
+        except ValueError:
+            continue
 
     print('# Features : rows({rows}) cols({cols})'.format(rows=train_features.shape[0], cols=train_features.shape[1]))
     # print(train_features.head(), '\n')
@@ -49,11 +52,14 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
 
     k_folds_sampled = []
     for idx, (x_train, y_train, x_test, y_test) in enumerate(k_folds):
-        sampler = SMOTE()
-        x_sample, y_sample = sampler.fit_resample(x_train, y_train)
-        x_sample = pd.DataFrame(x_sample, columns=x_train.columns)
-        y_sample = pd.Series(y_sample)
-        k_folds_sampled.append((x_sample, y_sample, x_test, y_test))
+        try:
+            sampler = SMOTE()
+            x_sample, y_sample = sampler.fit_resample(x_train, y_train)
+            x_sample = pd.DataFrame(x_sample, columns=x_train.columns)
+            y_sample = pd.Series(y_sample)
+            k_folds_sampled.append((x_sample, y_sample, x_test, y_test))
+        except ValueError:
+            continue
 
     k_folds_scaled = []
     for x_train, y_train, x_test, y_test in k_folds_sampled:
@@ -70,68 +76,99 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
 
     # Parameter tuning / grid search
     print('tuning parameters...')
-    best_params = {'max_depth': 6, 'min_child_weight': 1, 'eta': .3, 'subsample': 1, 'colsample_bytree': 1, 'objective': 'binary:logistic', 'booster': 'gbtree', 'verbosity': 0, 'eval_metric': "auc"}
+    best_params = {
+        'max_depth': 6,
+        'min_child_weight': 1,
+        'eta': .3,
+        'subsample': 1,
+        'colsample_bytree': 1,
+        'objective': 'binary:logistic',
+        'booster': 'gbtree',
+        'verbosity': 0,
+        'eval_metric': "auc"
+    }
+    tmp_params = {
+        'max_depth': 6,
+        'min_child_weight': 1,
+        'eta': .3,
+        'subsample': 1,
+        'colsample_bytree': 1,
+        'objective': 'binary:logistic',
+        'booster': 'gbtree',
+        'verbosity': 0,
+        'eval_metric': "auc"
+    }
     grid_search_params = [(max_depth, min_child_weight) for max_depth in range(0, 12) for min_child_weight in range(0, 8)]
     current_test_auc = -float("Inf")
-    tmp_params = None
     for max_depth, min_child_weight in grid_search_params:
-        # Update our parameters
-        best_params['max_depth'] = max_depth
-        best_params['min_child_weight'] = min_child_weight
-        # Run CV
-        cv_results = xgb.cv(best_params, train_data, nfold=5, metrics=['auc'], early_stopping_rounds=25)
-        # Update best MAE
-        mean_mae = cv_results['test-auc-mean'].max()
-        if mean_mae > current_test_auc:
-            current_test_auc = mean_mae
-            tmp_params = (max_depth, min_child_weight)
-    best_params['max_depth'] = tmp_params[0]
-    best_params['min_child_weight'] = tmp_params[1]
+        try:
+            # Update our parameters
+            tmp_params['max_depth'] = max_depth
+            tmp_params['min_child_weight'] = min_child_weight
+            # Run CV
+            cv_results = xgb.cv(tmp_params, train_data, nfold=5, metrics=['auc'], early_stopping_rounds=25)
+            # Update best MAE
+            mean_mae = cv_results['test-auc-mean'].max()
+            if mean_mae > current_test_auc:
+                current_test_auc = mean_mae
+                best_params['max_depth'] = max_depth
+                best_params['min_child_weight'] = min_child_weight
+        except xgb.core.XGBoostError:
+            continue
 
     grid_search_params = [(subsample, colsample) for subsample in [i / 10. for i in range(7, 11)] for colsample in [i / 10. for i in range(7, 11)]]
     current_test_auc = -float("Inf")
     tmp_params = {'subsample': None, 'colsample_bytree': None}
     # We start by the largest values and go down to the smallest
     for sub_sample, col_sample in reversed(grid_search_params):
-        # We update our parameters
-        best_params['subsample'] = sub_sample
-        best_params['colsample_bytree'] = col_sample
-        # Run CV
-        cv_results = xgb.cv(best_params, train_data, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
-        mean_mae = cv_results['test-auc-mean'].max()
-        if mean_mae > current_test_auc:
-            current_test_auc = mean_mae
-            tmp_params = {'subsample': sub_sample, 'colsample_bytree': col_sample}
+        try:
+            # We update our parameters
+            best_params['subsample'] = sub_sample
+            best_params['colsample_bytree'] = col_sample
+            # Run CV
+            cv_results = xgb.cv(best_params, train_data, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
+            mean_mae = cv_results['test-auc-mean'].max()
+            if mean_mae > current_test_auc:
+                current_test_auc = mean_mae
+                tmp_params = {'subsample': sub_sample, 'colsample_bytree': col_sample}
+        except xgb.core.XGBoostError:
+            continue
     best_params['subsample'] = tmp_params['subsample']
     best_params['colsample_bytree'] = tmp_params['colsample_bytree']
 
     current_test_auc = -float("Inf")
     tmp_params = None
     for eta in [.3, .2, .1, .05, .01, .005]:
-        # We update our parameters
-        best_params['eta'] = eta
-        # Run and time CV
-        cv_results = xgb.cv(best_params, train_data, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
-        # Update best score
-        mean_mae = cv_results['test-auc-mean'].max()
-        if mean_mae > current_test_auc:
-            current_test_auc = mean_mae
-            tmp_params = eta
+        try:
+            # We update our parameters
+            best_params['eta'] = eta
+            # Run and time CV
+            cv_results = xgb.cv(best_params, train_data, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
+            # Update best score
+            mean_mae = cv_results['test-auc-mean'].max()
+            if mean_mae > current_test_auc:
+                current_test_auc = mean_mae
+                tmp_params = eta
+        except xgb.core.XGBoostError:
+            continue
     best_params['eta'] = tmp_params
 
     current_test_auc = -float("Inf")
     tmp_params = None
     gamma_range = [i / 10.0 for i in range(0, 25)]
     for gamma in gamma_range:
-        # We update our parameters
-        best_params['gamma'] = gamma
-        # Run and time CV
-        cv_results = xgb.cv(best_params, train_data, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
-        # Update best score
-        mean_mae = cv_results['test-auc-mean'].max()
-        if mean_mae > current_test_auc:
-            current_test_auc = mean_mae
-            tmp_params = gamma
+        try:
+            # We update our parameters
+            best_params['gamma'] = gamma
+            # Run and time CV
+            cv_results = xgb.cv(best_params, train_data, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
+            # Update best score
+            mean_mae = cv_results['test-auc-mean'].max()
+            if mean_mae > current_test_auc:
+                current_test_auc = mean_mae
+                tmp_params = gamma
+        except xgb.core.XGBoostError:
+            continue
     best_params['gamma'] = tmp_params
 
     print('training and testing...')
@@ -172,7 +209,7 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
 
 if __name__ == '__main__':
     start_time = time.time()
-    _train_dir = 'C:/Users/Kevin/Desktop/data-processing-v2/8. no-filter-v2'
+    _train_dir = 'C:/Users/Kevin/Desktop/data-processing-v2/11. ppg+mobility-filter-v2'
     _test_dir = 'C:/Users/Kevin/Desktop/data-processing-v2/threshold-gridsearch/combined-filtered-dataset/test dataset'
 
     selected_feature_names = ['mean_nni', 'sdnn', 'rmssd', 'nni_50', 'lf', 'hf', 'lf_hf_ratio', 'sampen', 'ratio_sd2_sd1', 'sd2']
