@@ -132,7 +132,7 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
 
     print('training and testing...')
     xgb_models = []  # This is used to store models for each fold.
-    folds_scores_tmp = {'Accuracy (balanced)': [], 'F1 Score': [], 'ROC AUC score': [], 'True Positive rate': [], 'True Negative rate': []}
+    folds_scores_tmp = {'Accuracy (balanced)': [], 'F1 score': [], 'ROC AUC score': [], 'True Positive rate': [], 'True Negative rate': []}
     for x_train, y_train, x_test, y_test in k_folds_scaled:
         results = {}
         d_train = xgb.DMatrix(data=x_train, label=y_train.to_numpy())
