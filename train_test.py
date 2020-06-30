@@ -14,7 +14,7 @@ import os
 
 
 def load_dataset(directory, participant, selected_column_names, screen_out_timestamps=None):
-    _dataset = pd.read_csv('{dir}/{participant}.csv'.format(dir=directory, participant=participant)).replace([np.inf, -np.inf], np.nan).dropna(axis=0)
+    _dataset = pd.read_csv('{dir}/{participant}.csv'.format(dir=directory, participant=participant)).replace([np.inf, -np.inf], np.nan).dropna(axis=0).drop_duplicates(subset='timestamp')
     if screen_out_timestamps is not None:
         _dataset = _dataset[~_dataset.timestamp.isin(screen_out_timestamps)]
     _features = _dataset[selected_column_names]
@@ -27,15 +27,19 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
     ts, test_features, test_labels = load_dataset(directory=test_dir, participant=participant, selected_column_names=selected_feature_names)
     _, train_features, train_labels = load_dataset(directory=train_dir, participant=participant, selected_column_names=selected_feature_names, screen_out_timestamps=ts)
 
+    # configure test dataset
+    scaler = MinMaxScaler()
+    scaler.fit(test_features)
+    test_features_scaled = scaler.transform(test_features)
+    test_features = pd.DataFrame(test_features_scaled, index=test_features.index, columns=test_features.columns)
+
     k_folds = []
     splitter = StratifiedKFold(n_splits=5, shuffle=True)
     for idx, (train_indices, test_indices) in enumerate(splitter.split(train_features, train_labels)):
-        x_train = train_features.iloc[train_indices].copy()
-        x_train.append(train_features.iloc[test_indices])
-        y_train = train_labels.iloc[train_indices].copy()
-        y_train.append(train_labels.iloc[test_indices])
-        x_test = test_features.copy()
-        y_test = test_labels.copy()
+        x_train = train_features.iloc[train_indices]
+        y_train = train_labels.iloc[train_indices]
+        x_test = train_features.iloc[test_indices]
+        y_test = train_labels.iloc[test_indices]
         k_folds.append((x_train, y_train, x_test, y_test))
 
     print('# Features : rows({rows}) cols({cols})'.format(rows=train_features.shape[0], cols=train_features.shape[1]))
@@ -62,7 +66,7 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
         k_folds_scaled.append((x_train, y_train, x_test, y_test))
 
     conf_mtx = np.zeros((2, 2))  # 2 X 2 confusion matrix
-    d_train = xgb.DMatrix(data=train_features, label=train_labels.to_numpy())
+    train_data = xgb.DMatrix(data=train_features, label=train_labels.to_numpy())
 
     # Parameter tuning / grid search
     print('tuning parameters...')
@@ -75,7 +79,7 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
         best_params['max_depth'] = max_depth
         best_params['min_child_weight'] = min_child_weight
         # Run CV
-        cv_results = xgb.cv(best_params, d_train, nfold=5, metrics=['auc'], early_stopping_rounds=25)
+        cv_results = xgb.cv(best_params, train_data, nfold=5, metrics=['auc'], early_stopping_rounds=25)
         # Update best MAE
         mean_mae = cv_results['test-auc-mean'].max()
         if mean_mae > current_test_auc:
@@ -93,7 +97,7 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
         best_params['subsample'] = sub_sample
         best_params['colsample_bytree'] = col_sample
         # Run CV
-        cv_results = xgb.cv(best_params, d_train, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
+        cv_results = xgb.cv(best_params, train_data, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
         mean_mae = cv_results['test-auc-mean'].max()
         if mean_mae > current_test_auc:
             current_test_auc = mean_mae
@@ -107,7 +111,7 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
         # We update our parameters
         best_params['eta'] = eta
         # Run and time CV
-        cv_results = xgb.cv(best_params, d_train, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
+        cv_results = xgb.cv(best_params, train_data, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
         # Update best score
         mean_mae = cv_results['test-auc-mean'].max()
         if mean_mae > current_test_auc:
@@ -122,7 +126,7 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
         # We update our parameters
         best_params['gamma'] = gamma
         # Run and time CV
-        cv_results = xgb.cv(best_params, d_train, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
+        cv_results = xgb.cv(best_params, train_data, num_boost_round=1000, nfold=5, metrics=['auc'], early_stopping_rounds=25)
         # Update best score
         mean_mae = cv_results['test-auc-mean'].max()
         if mean_mae > current_test_auc:
@@ -134,27 +138,22 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
     xgb_models = []  # This is used to store models for each fold.
     folds_scores_tmp = {'Accuracy (balanced)': [], 'F1 score': [], 'ROC AUC score': [], 'True Positive rate': [], 'True Negative rate': []}
     for x_train, y_train, x_test, y_test in k_folds_scaled:
+        train_data = xgb.DMatrix(data=x_train, label=y_train.to_numpy())
+        evaluation_data = xgb.DMatrix(data=x_test, label=y_test.to_numpy())
+        test_data = xgb.DMatrix(data=test_features, label=test_labels.to_numpy())
+
+        # docs : https://xgboost.readthedocs.io/en/latest/parameter.html
         results = {}
-        d_train = xgb.DMatrix(data=x_train, label=y_train.to_numpy())
-        d_test = xgb.DMatrix(data=x_test, label=y_test.to_numpy())
+        booster = xgb.train(best_params, dtrain=train_data, num_boost_round=1000, early_stopping_rounds=25, evals=[(evaluation_data, 'test')], verbose_eval=False, evals_result=results)
+        print('Fold evaluation results : ', results)
+        predicted_probabilities = booster.predict(data=test_data, ntree_limit=booster.best_ntree_limit)
+        predicted_labels = np.where(predicted_probabilities > 0.5, 1, 0)
 
-        # xgboost.train() conducts actual model training and returns a trained model.
-        # For detailed parameter setting, please check: https://xgboost.readthedocs.io/en/latest/parameter.html
-        booster = xgb.train(best_params, dtrain=d_train, num_boost_round=1000, early_stopping_rounds=25, evals=[(d_test, 'test')], verbose_eval=False, evals_result=results)
-
-        # ntree_limit: the number of boosted trees used for prediction.
-        # booster.best_ntree_limit returns the number of trees that show best performance.
-        y_pred = booster.predict(data=d_test, ntree_limit=booster.best_ntree_limit)
-
-        # Because predict() returns probability, we should change them into class labels.
-        # Here, we set cur-off as 0.5: positive label when a probability is higher than 0.5.
-        y_pred_class = np.where(y_pred > 0.5, 1, 0)
-
-        acc = balanced_accuracy_score(y_test, y_pred_class)
-        f1 = f1_score(y_test, y_pred_class, average='macro')
-        roc_auc = roc_auc_score(y_test, y_pred)
-        tpr = recall_score(y_test, y_pred_class)
-        tnr = recall_score(y_test, y_pred_class, pos_label=0)
+        acc = balanced_accuracy_score(test_labels, predicted_labels)
+        f1 = f1_score(test_labels, predicted_labels, average='macro')
+        roc_auc = roc_auc_score(test_labels, predicted_probabilities)
+        tpr = recall_score(test_labels, predicted_labels)
+        tnr = recall_score(test_labels, predicted_labels, pos_label=0)
 
         folds_scores_tmp['Accuracy (balanced)'].append(acc)
         folds_scores_tmp['F1 score'].append(f1)
@@ -162,7 +161,7 @@ def participant_train_test_xgboost(participant, train_dir, test_dir):
         folds_scores_tmp['True Positive rate'].append(tpr)
         folds_scores_tmp['True Negative rate'].append(tnr)
 
-        conf_mtx += confusion_matrix(y_test, y_pred_class)
+        conf_mtx += confusion_matrix(test_labels, predicted_labels)
         xgb_models.append(booster)
 
     folds_scores = {}
@@ -199,11 +198,14 @@ if __name__ == '__main__':
     with open("test_scores.csv", "w+") as w_scores, open("test_params.csv", "w+") as w_params:
         w_params.write('Participant,{}\n'.format(','.join(params_cols)))
         w_scores.write('Participant,{}\n'.format(','.join(scores_cols)))
-        for participant in all_params:
-            w_params.write(participant)
+        for _participant in all_params:
+            w_params.write(_participant)
+            w_scores.write(_participant)
             for param_col in params_cols:
-                w_params.write(',{}'.format(all_params[participant][param_col]))
+                w_params.write(',{}'.format(all_params[_participant][param_col]))
             for score_col in scores_cols:
-                w_scores.write(',{}'.format(all_scores[participant][score_col]))
+                w_scores.write(',{}'.format(all_scores[_participant][score_col]))
+            w_params.write('\n')
+            w_scores.write('\n')
     print('completed!')
     print(' --- execution time : %s seconds --- ' % (time.time() - start_time))
