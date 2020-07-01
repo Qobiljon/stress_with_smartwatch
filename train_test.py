@@ -14,7 +14,8 @@ import os
 
 
 def load_dataset(directory, participant, selected_column_names, screen_out_timestamps=None):
-    _dataset = pd.read_csv('{dir}/{participant}.csv'.format(dir=directory, participant=participant)).replace([np.inf, -np.inf], np.nan).dropna(axis=0)#.drop_duplicates(subset='timestamp')
+    _dataset = pd.read_csv('{dir}/{participant}.csv'.format(dir=directory, participant=participant)).replace([np.inf, -np.inf], np.nan).dropna(axis=0)
+    # .drop_duplicates(subset='timestamp')
     if screen_out_timestamps is not None:
         _dataset = _dataset[~_dataset.timestamp.isin(screen_out_timestamps)]
     _features = _dataset[selected_column_names]

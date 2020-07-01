@@ -1,0 +1,382 @@
+# pip install --upgrade imblearn xgboost=1.0.0 lightgbm shap
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import StratifiedKFold
+from imblearn.over_sampling import SMOTE
+from sklearn.preprocessing import MinMaxScaler
+import xgboost as xgb
+from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score, confusion_matrix, precision_score, recall_score
+import plotly.graph_objs as go
+from sklearn.svm import SVC
+import matplotlib.pyplot as plt
+import shap
+import csv
+import os
+import glob
+from sklearn.decomposition import PCA
+from matplotlib import pyplot
+
+names = [
+    'timestamp', 'mean_nni', 'sdnn', 'sdsd', 'rmssd', 'median_nni',
+    'nni_50', 'pnni_50', 'nni_20', 'pnni_20', 'range_nni', 'cvsd', 'cvnni',
+    'mean_hr', 'max_hr', 'min_hr', 'std_hr', 'total_power', 'vlf', 'lf',
+    'hf', 'lf_hf_ratio', 'lfnu', 'hfnu', 'csi', 'cvi', 'Modified_csi',
+    'triangular_index', 'tinn', 'sd1', 'sd2', 'ratio_sd2_sd1', 'sampen',
+    'gt_self_report', 'gt_timestamp', 'gt_pss_control', 'gt_pss_difficult',
+    'gt_pss_confident', 'gt_pss_yourway', 'gt_likert_stresslevel',
+    'gt_score', 'gt_label'
+]
+selected_features = [
+    'mean_nni', 'sdnn', 'rmssd', 'nni_50', 'lf', 'hf', 'lf_hf_ratio', 'sampen', 'ratio_sd2_sd1', 'sd2'
+]  # sd1, 'sd2'
+
+params_all_users = {}
+
+with open("score.csv", "w+") as w:
+    w.write('Participant,Balanced Accuracy,F1 score,ROC_AUC,TPR,TNR\n')
+
+cwd = os.getcwd()
+_train_dir = 'C:/Users/Kevin/Desktop/data-processing-v2/8. no-filter-v2/'
+selected_feature_names = ['mean_nni', 'sdnn', 'rmssd', 'nni_50', 'lf', 'hf', 'lf_hf_ratio', 'sampen', 'ratio_sd2_sd1', 'sd2']
+for fname in [file for file in os.listdir(_train_dir) if file.endswith('.csv')]:
+    test_set = pd.read_csv('C:/Users/Kevin/Desktop/data-processing-v2/threshold-gridsearch/combined-filtered-dataset/test dataset/' + fname, names=selected_feature_names, skiprows=1)
+
+    X_test_fin = test_set[selected_features]
+    y_test_fin = test_set.iloc[:, -1].copy()
+    y_test_fin = y_test_fin.astype(int)
+
+    print('participant', fname)
+    DATA_SET = pd.read_csv(_train_dir+fname, skiprows=1, names=names).replace([np.inf, -np.inf], np.nan).dropna(axis=0).drop_duplicates(subset='timestamp')
+    DATA_SET = DATA_SET[['timestamp'] + selected_feature_names + ['gt_label']]
+    DATA_SET = pd.concat([DATA_SET, test_set]).drop_duplicates(subset='timestamp')
+    DATA_SET = pd.concat([DATA_SET, test_set]).drop_duplicates(subset='timestamp', keep=False)
+
+    FEATURE = DATA_SET.iloc[:, 1:-1].copy()
+    FEATURE = FEATURE[selected_features]
+    LABEL = DATA_SET['gt_label'].copy()
+    LABEL = LABEL.astype(int)
+
+    # Transform test data between [0,1]
+
+    scaler = MinMaxScaler()
+
+    # StandardScaler.fit() finds characteristics of data distribution (i.e., min, max) in train set.
+    scaler.fit(X_test_fin)
+
+    # Transform numeric data within train and test set.
+    X_test_fin_scaled = scaler.transform(X_test_fin)
+
+    # Because MinMaxScaler.transform() returns a tuple of numpy's array (not DataFrame or Series!),
+    # We need to again build DataFrame from scaled numeric data.
+    X_test_fin_scaled = pd.DataFrame(
+        X_test_fin_scaled, index=X_test_fin.index, columns=X_test_fin.columns
+    )
+
+    K_FOLDS = []
+
+    # n_splits: the number of folds.
+    # shuffle: whether data are shuffled before splitting.
+    splitter = StratifiedKFold(n_splits=5, shuffle=True)
+
+    # Here, 'train_indices' and 'test_indices' is numpy's array indicating indices of data.
+    for idx, (train_indices, test_indices) in enumerate(splitter.split(FEATURE, LABEL)):
+        X_train = FEATURE.iloc[train_indices]
+        y_train = LABEL.iloc[train_indices]
+
+        X_test = FEATURE.iloc[test_indices]
+        y_test = LABEL.iloc[test_indices]
+
+        # Here, we store train and test set of each fold into dictionary.
+        K_FOLDS.append((X_train, y_train, X_test, y_test))
+
+    K_FOLDS_RESAMPLE = []
+
+    for idx, (X_train, y_train, X_test, y_test) in enumerate(K_FOLDS):
+        # categorical_features: masked arrays indicating where categorical feature is placed.
+        sampler = SMOTE()
+
+        # 'fit_resample' conducts over-sampling data in the minority class.
+        # Again, resampling should be only conducted in train set.
+        X_sample, y_sample = sampler.fit_resample(X_train, y_train)
+
+        # Because SMOTENC.fit_resample() returns a tuple of numpy's array (not DataFrame or Series!),
+        # We need to again build DataFrame and Series from resampled data.
+        X_sample = pd.DataFrame(X_sample, columns=X_train.columns)
+        y_sample = pd.Series(y_sample)
+
+        K_FOLDS_RESAMPLE.append((X_sample, y_sample, X_test, y_test))
+
+    K_FOLDS_SCALED = []
+
+    for X_train, y_train, X_test, y_test in K_FOLDS_RESAMPLE:
+        scaler = MinMaxScaler()
+
+        # StandardScaler.fit() finds characteristics of data distribution (i.e., min, max) in train set.
+        scaler.fit(X_train)
+
+        # Transform numeric data within train and test set.
+        X_train_scale = scaler.transform(X_train)
+        X_test_scale = scaler.transform(X_test)
+
+        # Because MinMaxScaler.transform() returns a tuple of numpy's array (not DataFrame or Series!),
+        # We need to again build DataFrame from scaled numeric data.
+        X_train = pd.DataFrame(
+            X_train_scale, index=X_train.index, columns=X_train.columns
+        )
+        X_test = pd.DataFrame(
+            X_test_scale, index=X_test.index, columns=X_test.columns
+        )
+
+        K_FOLDS_SCALED.append((X_train, y_train, X_test, y_test))
+
+    # Transform train data between [0,1] and resampled in the minority class
+
+    sampler = SMOTE()
+
+    FEATURE_sample, LABEL_sample = sampler.fit_resample(FEATURE, LABEL)
+
+    FEATURE_sample = pd.DataFrame(FEATURE_sample, columns=FEATURE.columns)
+    LABEL_sample = pd.Series(LABEL_sample)
+
+    scaler = MinMaxScaler()
+
+    scaler.fit(FEATURE_sample)
+
+    X_train_scale = scaler.transform(FEATURE_sample)
+
+    FEATURE_scaled = pd.DataFrame(
+        X_train_scale, index=FEATURE_sample.index, columns=FEATURE.columns
+    )
+
+    # Balanced accuracy, F1 score, and ROC-AUC score.
+    scores = {
+        'acc': [],
+        'f1': [],
+        'roc_auc': [],
+        'TPR': [],
+        'TNR': [],
+        'FPR': [],
+        'accuracy': [],
+        'cohen kappa': []
+    }
+
+    score = []
+    score.append(fname)
+
+    params_all_users[fname] = {}
+
+    dtrain = xgb.DMatrix(data=FEATURE_scaled, label=LABEL_sample.to_numpy())
+
+    # Cross validationto find best hyperparameters using .cv function of xgboost
+
+    params_all_users[fname] = {
+        # Parameters that we are going to tune.
+        'max_depth': 6,
+        'min_child_weight': 1,
+        'eta': .3,
+        'subsample': 1,
+        'colsample_bytree': 1,
+        # Other parameters
+        'objective': 'binary:logistic',
+        'booster': 'gbtree',
+        'verbosity': 0
+    }
+
+    params_all_users[fname]['eval_metric'] = "auc"
+
+    cv_results = xgb.cv(
+        params_all_users[fname],
+        dtrain,
+        num_boost_round=1000,
+        nfold=5,
+        metrics={'auc'},
+        early_stopping_rounds=25
+    )
+
+    gridsearch_params = [
+        (max_depth, min_child_weight)
+        for max_depth in range(0, 12)
+        for min_child_weight in range(0, 8)
+    ]
+
+    min_mae = -float("Inf")
+    best_params = None
+    for max_depth, min_child_weight in gridsearch_params:
+        # Update our parameters
+        params_all_users[fname]['max_depth'] = max_depth
+        params_all_users[fname]['min_child_weight'] = min_child_weight
+        # Run CV
+        cv_results = xgb.cv(
+            params_all_users[fname],
+            dtrain,
+            nfold=5,
+            metrics={'auc'},
+            early_stopping_rounds=25
+        )
+        # Update best MAE
+        mean_mae = cv_results['test-auc-mean'].max()
+        boost_rounds = cv_results['test-auc-mean'].argmax()
+        if mean_mae > min_mae:
+            min_mae = mean_mae
+            best_params = (max_depth, min_child_weight)
+
+    params_all_users[fname]['max_depth'] = best_params[0]
+    params_all_users[fname]['min_child_weight'] = best_params[1]
+
+    gridsearch_params = [
+        (subsample, colsample)
+        for subsample in [i / 10. for i in range(7, 11)]
+        for colsample in [i / 10. for i in range(7, 11)]
+    ]
+
+    min_mae = -float("Inf")
+    best_params = None
+    # We start by the largest values and go down to the smallest
+    for subsample, colsample in reversed(gridsearch_params):
+        # We update our parameters
+        params_all_users[fname]['subsample'] = subsample
+        params_all_users[fname]['colsample_bytree'] = colsample
+        # Run CV
+        cv_results = xgb.cv(
+            params_all_users[fname],
+            dtrain,
+            num_boost_round=1000,
+            nfold=5,
+            metrics={'auc'},
+            early_stopping_rounds=25
+        )
+        mean_mae = cv_results['test-auc-mean'].max()
+        boost_rounds = cv_results['test-auc-mean'].argmax()
+        if mean_mae > min_mae:
+            min_mae = mean_mae
+            best_params = (subsample, colsample)
+    params_all_users[fname]['subsample'] = best_params[0]
+    params_all_users[fname]['colsample_bytree'] = best_params[1]
+
+    min_mae = -float("Inf")
+    best_params = None
+    for eta in [.3, .2, .1, .05, .01, .005]:
+        # We update our parameters
+        params_all_users[fname]['eta'] = eta
+        # Run and time CV
+        cv_results = xgb.cv(
+            params_all_users[fname],
+            dtrain,
+            num_boost_round=1000,
+            nfold=5,
+            metrics=['auc'],
+            early_stopping_rounds=25
+        )
+        # Update best score
+        mean_mae = cv_results['test-auc-mean'].max()
+        boost_rounds = cv_results['test-auc-mean'].argmax()
+        if mean_mae > min_mae:
+            min_mae = mean_mae
+            best_params = eta
+    params_all_users[fname]['eta'] = best_params
+
+    min_mae = -float("Inf")
+    best_params = None
+    gamma_range = [i / 10.0 for i in range(0, 25)]
+    for gamma in gamma_range:
+        # We update our parameters
+        params_all_users[fname]['gamma'] = gamma
+        # Run and time CV
+        cv_results = xgb.cv(
+            params_all_users[fname],
+            dtrain,
+            num_boost_round=1000,
+            nfold=5,
+            metrics=['auc'],
+            early_stopping_rounds=25
+        )
+        # Update best score
+        mean_mae = cv_results['test-auc-mean'].max()
+        boost_rounds = cv_results['test-auc-mean'].argmax()
+        if mean_mae > min_mae:
+            min_mae = mean_mae
+            best_params = gamma
+    params_all_users[fname]['gamma'] = best_params
+
+    for X_train, y_train, X_test, y_test in K_FOLDS_SCALED:
+        results = {}
+        MAX_ITER = 1000
+        ETA_BASE = 0.03
+        ETA_MIN = 0.001
+        ETA_DECAY = np.linspace(ETA_BASE, ETA_MIN, MAX_ITER).tolist()
+        # XGBoost requires a special data structure, xgboost.DMatrix()
+        # Here we build DMatrix for train and test set.
+        dtrain = xgb.DMatrix(data=X_train, label=y_train.to_numpy())
+        deval = xgb.DMatrix(data=X_test, label=y_test.to_numpy())
+        dtest = xgb.DMatrix(data=X_test_fin_scaled, label=y_test_fin.to_numpy())
+
+        # xgboost.train() conducts actual model training and returns a trained model.
+        # For detailed parameter setting, please check: https://xgboost.readthedocs.io/en/latest/parameter.html
+        booster = xgb.train(
+            params_all_users[fname],
+            # dtrain: DMatrix of training data
+            dtrain=dtrain,
+            # num_boost_round: the number of boosted trees
+            num_boost_round=1000,
+            # early_stopping_rounds: early stop generating trees when eval_metric is not improved
+            early_stopping_rounds=25,
+            # evals: evaluation set to check early stooping
+            evals=[(deval, 'test')],  # ,(dtrain,'train')],
+            verbose_eval=False,
+            evals_result=results
+        )
+
+        # Threshold for preciction is an other hyper parameter, did not used that for the test
+
+        # y_pred = booster.predict(
+        #    data=deval, 
+        #    ntree_limit=booster.best_ntree_limit)
+
+        # thresholds = [i/20.0 for i in range(0,20)]
+        # best_f1 = 0
+        # for thresh in thresholds :
+        #  y_class = np.where(y_pred > thresh, 1, 0)
+        #  f1 = f1_score(y_test, y_class, average='macro')
+        #  if f1>best_f1:
+        #    best_f1 = f1
+        #    best_thresh = thresh
+
+        # evaluation on the test set
+
+        y_pred = booster.predict(
+            data=dtest,
+            ntree_limit=booster.best_ntree_limit)
+
+        # Because predict() returns probability, we should change them into class labels.
+        # Here, we set cur-off as 0.5: positive label when a probability is higher than 0.5.
+        best_thresh = 0.5
+        y_pred_class = np.where(y_pred > best_thresh, 1, 0)
+
+        acc = balanced_accuracy_score(y_test_fin, y_pred_class)
+        f1 = f1_score(y_test_fin, y_pred_class, average='macro')
+        roc_auc = roc_auc_score(y_test_fin, y_pred)
+        tpr = recall_score(y_test_fin, y_pred_class)
+        tnr = recall_score(y_test_fin, y_pred_class, pos_label=0)
+        fpr = precision_score(y_test_fin, y_pred_class)
+        # ac = accuracy_score(y_test_fin,y_pred_class)
+        # ck = cohen_kappa_score(y_test_fin,y_pred_class)
+
+        scores['acc'].append(acc)
+        scores['f1'].append(f1)
+        scores['roc_auc'].append(roc_auc)
+        scores['TPR'].append(tpr)
+        scores['TNR'].append(tnr)
+        scores['FPR'].append(fpr)
+        # scores['accuracy'].append(ac)
+        # scores['cohen kappa'].append(ck)
+
+    # print('# Classification results')
+    for k, v in scores.items():
+        print('- {}: {}'.format(k.upper(), np.mean(v)))
+        score.append(np.mean(v))
+
+    # write results into csv (i did not change that here )
+
+    with open("%s/score.csv" % cwd, "a+") as w:
+        w.write(','.join([str(val) for val in score]) + '\n')
